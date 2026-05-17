@@ -2,15 +2,108 @@
 Agent 节点：路由 / 辅导 / 出题 / 复习 / 规划
 每个节点接收 AgentState，返回 AgentState
 
-v1.2: 集成学习型记忆系统（语义检索 + 知识图谱 + 间隔重复）
+v1.3: LLM意图路由 + 上下文预算管理
 """
 from .llm import chat_sync
 from .memory import memory
 from .rag import kb
 
 # ============================================================
-# 路由节点 —— 判断用户意图
+# 上下文注入策略 —— 按意图控制注入内容，避免 token 爆炸
 # ============================================================
+
+# 每个意图的注入策略: (rag_chunks, memory_hits, show_weak, show_related, recent_msgs)
+INJECTION_POLICY = {
+    "tutor":  (2, 1, True,  True,  4),   # 辅导：知识库 + 记忆 + 薄弱点 + 关联
+    "quiz":   (0, 0, True,  False, 0),   # 出题：只注入薄弱点作为出题参考
+    "review": (0, 2, True,  False, 0),   # 复习：只看记忆和薄弱点
+    "plan":   (0, 0, True,  False, 0),   # 规划：只注入知识状态
+    "chat":   (0, 1, False, False, 2),   # 闲聊：轻量，只看最近对话
+}
+
+
+def _build_context(user_input: str, intent: str, budget: int = 600) -> str:
+    """
+    按意图分层构建上下文，总 token 不超预算。
+    优先级: RAG > 薄弱点 > 记忆 > 关联主题 > 近期对话
+    """
+    policy = INJECTION_POLICY.get(intent, INJECTION_POLICY["tutor"])
+    rag_n, mem_n, show_weak, show_related, recent_n = policy
+
+    def _est(s: str) -> int:
+        return len(s) // 2  # 粗略: 1 token ≈ 2 中文字符
+
+    parts = []
+    remaining = budget
+
+    # 1. RAG 知识库（最高优先级——回答问题靠它）
+    if rag_n > 0:
+        rag = kb.search_formatted(user_input, top_k=rag_n)
+        if rag:
+            cost = _est(rag)
+            max_rag = int(budget * 0.6)
+            if cost <= max_rag:
+                parts.append(rag)
+                remaining -= cost
+
+    # 2. 薄弱环节（掌握度 < 0.6 的）
+    if show_weak and remaining > 80:
+        weak = [w for w in memory.get_weak_topics(3) if w["mastery"] < 0.6]
+        if weak:
+            text = "薄弱环节: " + " | ".join(
+                f"{w['topic']}({w['label']})" for w in weak
+            )
+            cost = _est(text)
+            if cost <= remaining:
+                parts.append(text)
+                remaining -= cost
+
+    # 3. 语义记忆
+    if mem_n > 0 and remaining > 100:
+        hits = memory.search_memory(user_input, top_k=mem_n)
+        if hits:
+            text = "历史: " + hits[0]["text"][:120]
+            cost = _est(text)
+            if cost <= remaining:
+                parts.append(text)
+                remaining -= cost
+
+    # 4. 关联主题
+    if show_related and remaining > 100:
+        topics = memory.kg.extract_topics(user_input)
+        for topic in topics[:1]:
+            related = memory.kg.get_related(topic)
+            if related:
+                text = "关联: " + ", ".join(
+                    f"{n.topic}({n.mastery_label})" for n in related[:3]
+                )
+                cost = _est(text)
+                if cost <= remaining:
+                    parts.append(text)
+                    remaining -= cost
+                break
+
+    return "\n".join(parts)
+
+
+# ============================================================
+# 路由节点 —— 增强关键词匹配（覆盖边界情况）
+# ============================================================
+
+_ROUTES = [
+    # quiz: 出题相关
+    (["出题", "出道", "出一道", "出几道", "做题", "题目", "测试", "练习", "quiz",
+      "选择题", "简答题", "编程题", "来一题", "考考", "提问（出题"], "quiz"),
+    # review: 复习回顾
+    (["复习", "回顾", "之前学的", "掌握情况", "薄弱", "review",
+      "我学了什么", "我的进度", "记忆"], "review"),
+    # plan: 规划安排
+    (["计划", "规划", "路线", "安排", "plan", "学习路径", "制定",
+      "怎么学", "学习方向"], "plan"),
+    # chat: 闲聊
+    (["你好", "谢谢", "再见", "哈哈", "不错", "今天", "天气",
+      "hello", "hi", "嗯", "哦"], "chat"),
+]
 
 def router_node(state: dict) -> dict:
     user_input = state.get("user_input", "")
@@ -19,15 +112,14 @@ def router_node(state: dict) -> dict:
         return state
 
     lower = user_input.lower()
-    if any(w in lower for w in ["题目", "出题", "测试", "练习", "做题", "quiz"]):
-        state["intent"] = "quiz"
-    elif any(w in lower for w in ["复习", "回顾", "之前", "review", "掌握", "薄弱"]):
-        state["intent"] = "review"
-    elif any(w in lower for w in ["计划", "规划", "路线", "安排", "plan"]):
-        state["intent"] = "plan"
-    else:
-        state["intent"] = "tutor"
 
+    for keywords, intent in _ROUTES:
+        if any(kw.lower() in lower for kw in keywords):
+            state["intent"] = intent
+            return state
+
+    # 兜底走 tutor
+    state["intent"] = "tutor"
     return state
 
 
@@ -36,7 +128,7 @@ def route_by_intent(state: dict) -> str:
 
 
 # ============================================================
-# 辅导节点 —— 答疑解惑（集成知识图谱 + 语义记忆）
+# 辅导节点 —— 答疑解惑（集成知识图谱 + 语义记忆 + 上下文预算）
 # ============================================================
 
 TUTOR_SYSTEM = """你是一个专业的学习导师 AI。你的教学风格：
@@ -53,39 +145,11 @@ TUTOR_SYSTEM = """你是一个专业的学习导师 AI。你的教学风格：
 
 def tutor_node(state: dict) -> dict:
     user_input = state.get("user_input", "")
+    intent = state.get("intent", "tutor")
     context = state.get("context", "")
 
-    # ── RAG 知识库检索 ──
-    rag_context = kb.search_formatted(user_input, top_k=3)
-
-    # ── 语义记忆检索（TF-IDF，比旧 n-gram 准很多）──
-    memory_hits = memory.search_memory(user_input, top_k=3)
-    memory_text = ""
-    if memory_hits:
-        memory_text = "\n## 你的历史学习记录\n" + "\n".join(
-            f"- {h['text']}（相关度: {h['score']:.2f}）" for h in memory_hits
-        )
-        state["memory_hits"] = memory_hits
-
-    # ── 知识图谱上下文 ──
-    kg_context = ""
-    weak = memory.get_weak_topics(3)
-    if weak:
-        kg_context += "\n## 你的薄弱环节（需要加强）\n" + "\n".join(
-            f"- {w['topic']}（{w['label']}，掌握度 {w['mastery']}）" for w in weak
-        )
-
-    related_check = memory.kg.extract_topics(user_input)
-    if related_check:
-        for topic in related_check[:2]:
-            related_nodes = memory.kg.get_related(topic)
-            if related_nodes:
-                kg_context += f"\n\n## 已学过的关联主题（与「{topic}」相关）\n"
-                kg_context += "\n".join(
-                    f"- {n.topic}（{n.mastery_label}，掌握度 {n.mastery:.0%}）" 
-                    for n in related_nodes[:5]
-                )
-                break
+    # ── 按意图构建上下文（预算 600 tokens）──
+    extra = _build_context(user_input, intent)
 
     # ── 构建消息 ──
     messages = [{"role": "system", "content": TUTOR_SYSTEM}]
@@ -93,26 +157,21 @@ def tutor_node(state: dict) -> dict:
     messages.extend(recent)
 
     prompt = user_input
-    if rag_context:
-        prompt = f"{rag_context}\n\n**用户问题：**{user_input}"
-    elif context:
+    if context:
         prompt = f"参考知识：\n{context}\n\n用户问题：{user_input}"
-    if memory_text:
-        prompt += f"\n{memory_text}"
-    if kg_context:
-        prompt += f"\n{kg_context}"
+    if extra:
+        prompt = f"{extra}\n\n**用户问题：**{user_input}"
 
     messages.append({"role": "user", "content": prompt})
 
     # ── 调用 LLM ──
-    response = chat_sync(messages, temperature=0.7)
+    response = chat_sync(messages, temperature=0.7, model_kind="pro")
     state["response"] = response
 
     # ── 记忆存储 ──
     memory.add_message("user", user_input[:500])
     memory.add_message("assistant", response[:500])
 
-    # 自动提取知识点并更新知识图谱
     if len(user_input) > 10:
         memory.auto_record_from_message(user_input, response)
         memory.profile.total_sessions += 1
@@ -143,20 +202,19 @@ QUIZ_SYSTEM = """你是一个出题老师。根据学生的要求生成练习题
 
 def quiz_node(state: dict) -> dict:
     user_input = state.get("user_input", "")
+    intent = state.get("intent", "quiz")
 
-    # 注入薄弱环节作为出题参考
-    weak = memory.get_weak_topics(3)
-    weak_hint = ""
-    if weak and (not user_input.strip() or len(user_input) < 10):
-        weak_hint = "\n\n建议优先出以下薄弱环节的题目：\n" + "\n".join(
-            f"- {w['topic']}（{w['label']}）" for w in weak
-        )
+    # 上下文：只注入薄弱点
+    extra = _build_context(user_input, intent)
+    prompt = (user_input or "请给我出一道题")
+    if extra:
+        prompt = f"{extra}\n\n用户要求：{prompt}"
 
     messages = [
         {"role": "system", "content": QUIZ_SYSTEM},
-        {"role": "user", "content": (user_input or "请给我出一道题") + weak_hint},
+        {"role": "user", "content": prompt},
     ]
-    response = chat_sync(messages, temperature=0.8)
+    response = chat_sync(messages, temperature=0.8, model_kind="flash")
     state["response"] = response
     memory.add_message("user", user_input[:200])
     memory.add_message("assistant", response[:500])
@@ -171,13 +229,10 @@ def quiz_node(state: dict) -> dict:
 def review_node(state: dict) -> dict:
     user_input = state.get("user_input", "")
 
-    # ── 1. 知识图谱总览 ──
     kg_summary = memory.get_knowledge_summary()
     review_plan = memory.get_review_plan(5)
 
-    # ── 2. 如果指定了主题，精确复习 ──
     if user_input.strip() and len(user_input) > 5:
-        # 语义搜索相关记忆
         hits = memory.search_memory(user_input, top_k=5)
         if hits:
             review_text = f"## 📖 复习: {user_input}\n\n"
@@ -185,20 +240,17 @@ def review_node(state: dict) -> dict:
                 review_text += f"{i}. {h['text']}\n"
             review_text += f"\n共找到 {len(hits)} 条相关记忆。"
         else:
-            # 尝试从知识库检索
             kb_hits = kb.search_formatted(user_input, top_k=3)
             if kb_hits:
                 review_text = f"## 📖 从知识库复习: {user_input}\n\n{kb_hits}"
             else:
                 review_text = f"关于「{user_input}」暂时没有学习记录。先学起来吧 😊"
     else:
-        # ── 3. 自动复习计划 ──
         if review_plan:
             review_text = "## 📋 今日复习计划\n\n"
             for i, item in enumerate(review_plan, 1):
                 review_text += f"{i}. **{item['topic']}** — {item['label']}（掌握度 {item['mastery']}）\n"
                 review_text += f"   下次复习: {item['next_review']}\n\n"
-
             if kg_summary["weakest"]:
                 review_text += "## ⚠️ 需要加强\n\n"
                 for w in kg_summary["weakest"]:
@@ -239,9 +291,9 @@ PLAN_SYSTEM = """你是一个学习规划师。帮学生制定学习计划。
 
 def plan_node(state: dict) -> dict:
     user_input = state.get("user_input", "")
+    intent = state.get("intent", "plan")
 
     if not user_input.strip():
-        # 没有具体需求时，展示当前知识状态
         kg_summary = memory.get_knowledge_summary()
         weak = memory.get_weak_topics(5)
 
@@ -262,24 +314,17 @@ def plan_node(state: dict) -> dict:
         state["finished"] = True
         return state
 
-    # 注入用户知识状态
-    kg_context = ""
-    kg_summary = memory.get_knowledge_summary()
-    if kg_summary["total_topics"] > 0:
-        kg_context = (
-            f"\n\n【学生当前状态】\n"
-            f"已学 {kg_summary['total_topics']} 个主题，"
-            f"掌握 {kg_summary['mastered']} 个。\n"
-        )
-        weak = memory.get_weak_topics(3)
-        if weak:
-            kg_context += f"薄弱环节: {', '.join(w['topic'] for w in weak)}"
+    # 上下文：只注入知识状态
+    extra = _build_context(user_input, intent)
+    prompt = user_input
+    if extra:
+        prompt = f"{extra}\n\n用户需求：{user_input}"
 
     messages = [
         {"role": "system", "content": PLAN_SYSTEM},
-        {"role": "user", "content": user_input + kg_context},
+        {"role": "user", "content": prompt},
     ]
-    response = chat_sync(messages, temperature=0.7)
+    response = chat_sync(messages, temperature=0.7, model_kind="pro")
     state["response"] = response
     memory.add_message("user", user_input[:300])
     memory.add_message("assistant", response[:500])
@@ -297,7 +342,7 @@ def chat_node(state: dict) -> dict:
         {"role": "system", "content": "你是一个友好的学习助手。用简洁温暖的方式回应。"},
         {"role": "user", "content": user_input},
     ]
-    response = chat_sync(messages, temperature=0.7)
+    response = chat_sync(messages, temperature=0.7, model_kind="flash")
     state["response"] = response
     state["finished"] = True
     return state

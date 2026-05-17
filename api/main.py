@@ -2,7 +2,7 @@
 学习 Agent — FastAPI 接口
 启动: python -m uvicorn api.main:app --reload --port 8000
 
-v1.2: 新增记忆系统接口（知识图谱、复习计划、学习档案）
+v1.3: LLM意图路由 + 上下文预算管理 + 多模型路由
 """
 import sys
 import os
@@ -63,7 +63,7 @@ async def chat(req: ChatRequest):
 @app.get("/api/health")
 async def health():
     """健康检查"""
-    return {"status": "ok", "agent": "学习 Agent v1.2.0", "memory": memory.get_status()}
+    return {"status": "ok", "agent": "学习 Agent v1.3.0", "memory": memory.get_status()}
 
 
 # ========== 记忆系统接口 ==========
