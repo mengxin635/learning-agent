@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# 环境
+.env
+*.egg-info/
+dist/
+
+# 数据
+data/memory/long_term.json
+
+# IDE
+.vscode/
+.idea/
