@@ -15,3 +15,5 @@ data/memory/long_term.json
 # IDE
 .vscode/
 .idea/
+data/knowledge_base/chunks.json
+data/memory/*.json

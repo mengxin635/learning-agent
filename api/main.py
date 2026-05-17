@@ -1,6 +1,8 @@
 """
 学习 Agent — FastAPI 接口
 启动: python -m uvicorn api.main:app --reload --port 8000
+
+v1.2: 新增记忆系统接口（知识图谱、复习计划、学习档案）
 """
 import sys
 import os
@@ -16,7 +18,7 @@ from agent import run_agent, memory
 from agent.rag import kb, KB_DIR
 import shutil
 
-app = FastAPI(title="学习 Agent", version="1.1.0")
+app = FastAPI(title="学习 Agent", version="1.2.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -25,6 +27,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+# ========== 请求/响应模型 ==========
 
 class ChatRequest(BaseModel):
     message: str
@@ -38,6 +42,14 @@ class ChatResponse(BaseModel):
     error: str = ""
 
 
+class RecordLearningRequest(BaseModel):
+    topic: str
+    quality: float = 0.5
+    related: list = []
+
+
+# ========== 对话接口 ==========
+
 @app.post("/api/chat", response_model=ChatResponse)
 async def chat(req: ChatRequest):
     """对话接口"""
@@ -48,26 +60,72 @@ async def chat(req: ChatRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/api/health")
+async def health():
+    """健康检查"""
+    return {"status": "ok", "agent": "学习 Agent v1.2.0", "memory": memory.get_status()}
+
+
+# ========== 记忆系统接口 ==========
+
 @app.get("/api/memory")
 async def get_memory():
-    """查看记忆状态"""
+    """获取完整记忆状态：工作记忆 + 长期记忆 + 知识图谱 + 用户档案"""
+    return memory.get_status()
+
+
+@app.get("/api/memory/status")
+async def memory_status():
+    """记忆状态摘要"""
+    status = memory.get_status()
     return {
-        "short_term_count": len(memory.short_term),
-        "long_term_count": len(memory.long_term_texts),
-        "recent": memory.get_recent(5),
+        "short_term": status["short_term"],
+        "long_term": status["long_term"],
+        "topics": status["knowledge_graph"]["total_topics"],
+        "mastered": status["knowledge_graph"]["mastered"],
+        "learning": status["knowledge_graph"]["learning"],
+        "due_review": status["knowledge_graph"]["due_review"],
     }
 
 
 @app.delete("/api/memory")
 async def clear_memory():
-    """清除短期记忆"""
+    """清空短期对话记忆（保留知识图谱）"""
     memory.short_term = []
-    return {"status": "短期记忆已清除"}
+    return {"status": "ok", "message": "短期记忆已清空"}
 
 
-@app.get("/api/health")
-async def health():
-    return {"status": "ok", "agent": "学习 Agent v1.1.0"}
+# ========== 知识图谱接口 ==========
+
+@app.get("/api/knowledge")
+async def get_knowledge():
+    """获取知识图谱总览"""
+    return memory.get_knowledge_summary()
+
+
+@app.get("/api/knowledge/topics")
+async def get_all_topics():
+    """获取所有已学主题及掌握度"""
+    return {"topics": memory.kg.get_all_topics()}
+
+
+@app.post("/api/knowledge/record")
+async def record_knowledge(req: RecordLearningRequest):
+    """手动记录学习（通常自动记录，此接口用于手动补充）"""
+    memory.kg.record_learning(req.topic, req.quality, req.related if req.related else None)
+    return {"status": "ok", "topic": req.topic}
+
+
+@app.get("/api/knowledge/weak")
+async def get_weak_topics(limit: int = 5):
+    """获取掌握度最低的主题"""
+    return {"weak_topics": memory.get_weak_topics(limit)}
+
+
+@app.get("/api/knowledge/review-plan")
+async def get_review_plan(limit: int = 5):
+    """获取今日复习计划"""
+    return {"review_plan": memory.get_review_plan(limit)}
 
 
 # ========== 知识库接口 ==========
@@ -80,14 +138,11 @@ async def upload_file(file: UploadFile = File(...)):
     if ext not in allowed:
         raise HTTPException(400, f"不支持的格式: {ext}，支持: {', '.join(allowed)}")
 
-    # 保存临时文件
     tmp_path = os.path.join(KB_DIR, f"_tmp_{file.filename}")
     with open(tmp_path, "wb") as f:
         shutil.copyfileobj(file.file, f)
 
-    # 摄入知识库（用原始文件名作为 source）
     count = kb.ingest_file(tmp_path)
-    # 修正 source 名称
     for chunk in kb.chunks:
         if chunk["source"] == os.path.basename(tmp_path):
             chunk["source"] = file.filename or "uploaded"
