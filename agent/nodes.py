@@ -4,6 +4,7 @@ Agent 节点：路由 / 辅导 / 出题 / 记忆 / 规划
 """
 from .llm import chat_sync
 from .memory import memory
+from .rag import kb
 
 # ============================================================
 # 路由节点 —— 判断用户意图
@@ -67,6 +68,9 @@ def tutor_node(state: dict) -> dict:
     user_input = state.get("user_input", "")
     context = state.get("context", "")
 
+    # RAG 知识库检索
+    rag_context = kb.search_formatted(user_input, top_k=3)
+
     # 检索相关记忆
     hits = memory.search(user_input, top_k=3)
     memory_text = ""
@@ -83,9 +87,11 @@ def tutor_node(state: dict) -> dict:
     recent = memory.get_recent(6)
     messages.extend(recent)
 
-    # 注入记忆 + 上下文
+    # 注入知识库 + 记忆 + 上下文
     prompt = user_input
-    if context:
+    if rag_context:
+        prompt = f"{rag_context}\n\n**用户问题：**{user_input}"
+    elif context:
         prompt = f"参考知识：\n{context}\n\n用户问题：{user_input}"
     if memory_text:
         prompt += f"\n{memory_text}"
