@@ -16,9 +16,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from agent import run_agent, memory
 from agent.rag import kb, KB_DIR
+from agent.quiz import quiz_manager
 import shutil
 
-app = FastAPI(title="学习 Agent", version="1.2.0")
+app = FastAPI(title="学习 Agent", version="1.4.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -48,6 +49,18 @@ class RecordLearningRequest(BaseModel):
     related: list = []
 
 
+class QuizStartRequest(BaseModel):
+    topic: str = ""
+    difficulty: str = "medium"
+    question_type: str = "choice"
+    count: int = 5
+
+
+class QuizAnswerRequest(BaseModel):
+    session_id: str
+    answer: str
+
+
 # ========== 对话接口 ==========
 
 @app.post("/api/chat", response_model=ChatResponse)
@@ -63,7 +76,7 @@ async def chat(req: ChatRequest):
 @app.get("/api/health")
 async def health():
     """健康检查"""
-    return {"status": "ok", "agent": "学习 Agent v1.3.0", "memory": memory.get_status()}
+    return {"status": "ok", "agent": "学习 Agent v1.4.0", "memory": memory.get_status()}
 
 
 # ========== 记忆系统接口 ==========
@@ -184,6 +197,74 @@ async def kb_clear():
     """清空知识库"""
     kb.clear()
     return {"status": "ok", "message": "知识库已清空"}
+
+
+# ========== 测验接口 v1.4 — 多轮出题 + 自动判卷 ==========
+
+@app.post("/api/quiz/start")
+async def quiz_start(req: QuizStartRequest):
+    """开始一轮测验，返回第一道题"""
+    if req.count < 1 or req.count > 20:
+        raise HTTPException(400, "题目数量需在 1-20 之间")
+    if req.difficulty not in ("easy", "medium", "hard"):
+        raise HTTPException(400, "难度需为 easy/medium/hard")
+    if req.question_type not in ("choice", "fill", "coding", "mixed"):
+        raise HTTPException(400, "题型需为 choice/fill/coding/mixed")
+
+    session = quiz_manager.start_quiz(
+        topic=req.topic,
+        difficulty=req.difficulty,
+        q_type=req.question_type,
+        count=req.count,
+    )
+    q = session.current_question()
+    if not q:
+        raise HTTPException(500, "生成题目失败，请重试")
+
+    return {
+        "session_id": session.session_id,
+        "question": {
+            "q_type": q.q_type,
+            "text": q.text,
+            "options": q.options,
+            "difficulty": q.difficulty,
+            "topic": q.topic,
+        },
+        "progress": session.progress(),
+    }
+
+
+@app.post("/api/quiz/answer")
+async def quiz_answer(req: QuizAnswerRequest):
+    """提交答案，返回判卷结果 + 下一题"""
+    result = quiz_manager.submit_answer(req.session_id, req.answer)
+    if "error" in result:
+        raise HTTPException(400, result["error"])
+    return result
+
+
+@app.get("/api/quiz/status/{session_id}")
+async def quiz_status(session_id: str):
+    """查看测验进度"""
+    session = quiz_manager.get_session(session_id)
+    if not session:
+        raise HTTPException(404, "会话不存在")
+    return {
+        "session_id": session_id,
+        "topic": session.topic,
+        "difficulty": session.difficulty,
+        "q_type": session.q_type,
+        "progress": session.progress(),
+    }
+
+
+@app.get("/api/quiz/summary/{session_id}")
+async def quiz_summary(session_id: str):
+    """查看测验总结"""
+    summary = quiz_manager.get_summary(session_id)
+    if "error" in summary:
+        raise HTTPException(404, summary["error"])
+    return summary
 
 
 # 挂载前端静态文件
