@@ -211,12 +211,21 @@ async def quiz_start(req: QuizStartRequest):
     if req.question_type not in ("choice", "fill", "coding", "mixed"):
         raise HTTPException(400, "题型需为 choice/fill/coding/mixed")
 
-    session = quiz_manager.start_quiz(
-        topic=req.topic,
-        difficulty=req.difficulty,
-        q_type=req.question_type,
-        count=req.count,
-    )
+    # 安全：topic 也做一次长度截断
+    safe_topic = req.topic.strip()[:200] if req.topic else ""
+
+    try:
+        session = quiz_manager.start_quiz(
+            topic=safe_topic,
+            difficulty=req.difficulty,
+            q_type=req.question_type,
+            count=req.count,
+        )
+    except ValueError as e:
+        raise HTTPException(500, str(e))
+    except Exception:
+        raise HTTPException(500, "出题服务暂时不可用，请稍后重试")
+
     q = session.current_question()
     if not q:
         raise HTTPException(500, "生成题目失败，请重试")

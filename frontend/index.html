@@ -348,6 +348,14 @@ let quizActive = false;
 let currentSessionId = null;
 let selectedOption = null;
 
+// XSS 防护：HTML 转义
+function escapeHtml(s) {
+  if (!s) return '';
+  const div = document.createElement('div');
+  div.textContent = s;
+  return div.innerHTML;
+}
+
 // ====== Tab switching ======
 function openTab(tab) {
   currentTab = tab;
@@ -548,18 +556,19 @@ function renderQuestion(q, progress) {
 
   let html = `
     <div class="quiz-header">
-      <span class="q-title">📝 ${typeLabel}</span>
+      <span class="q-title">📝 ${escapeHtml(typeLabel)}</span>
       <span class="q-progress">${progress.current} / ${progress.total}</span>
     </div>
-    <div class="q-topic">📌 ${q.topic}</div>
-    <span class="q-difficulty ${q.difficulty}">${difficultyLabel(q.difficulty)}</span>
-    <div class="q-text">${q.text}</div>
+    <div class="q-topic">📌 ${escapeHtml(q.topic)}</div>
+    <span class="q-difficulty ${escapeHtml(q.difficulty)}">${difficultyLabel(q.difficulty)}</span>
+    <div class="q-text">${escapeHtml(q.text)}</div>
   `;
 
   if (q.q_type === 'choice' && q.options && q.options.length > 0) {
     html += '<div class="q-options">';
     for (const opt of q.options) {
-      html += `<button class="q-option" onclick="selectOption(this, '${opt.replace(/'/g, "\\'")}')">${opt}</button>`;
+      // onclick 中用转义后的文本，避免引号注入
+      html += `<button class="q-option" onclick="selectOption(this, '${escapeHtml(opt).replace(/'/g, "&#39;")}')">${escapeHtml(opt)}</button>`;
     }
     html += '</div>';
     html += `<button class="btn-submit" id="btnSubmitAnswer" onclick="submitAnswer()" disabled>请先选择答案</button>`;
@@ -690,10 +699,10 @@ async function showQuizSummary() {
       html += '<div class="section-title">❌ 错题回顾</div>';
       for (const w of data.wrong_answers) {
         html += `<div class="wrong-item">
-          <div class="w-q">${w.num}. ${w.question}</div>
-          <div class="w-a">你的答案: ${w.user_answer}</div>
-          <div class="w-correct">正确答案: ${w.correct_answer}</div>
-          <div style="color:var(--dim);margin-top:4px;">${w.explanation}</div>
+          <div class="w-q">${w.num}. ${escapeHtml(w.question)}</div>
+          <div class="w-a">你的答案: ${escapeHtml(w.user_answer)}</div>
+          <div class="w-correct">正确答案: ${escapeHtml(w.correct_answer)}</div>
+          <div style="color:var(--dim);margin-top:4px;">${escapeHtml(w.explanation)}</div>
         </div>`;
       }
     } else if (data.total === data.correct) {
