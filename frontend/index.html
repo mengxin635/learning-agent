@@ -3,10 +3,10 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate, max-age=0">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<title>学习 Agent v1.4.2 · AI Tutor + Quiz</title>
+<title>学习 Agent v1.4.3 · AI Tutor + Quiz</title>
 <style>
   :root {
     --bg: #06090f; --surface: #0d1117; --border: #21262d;
@@ -126,8 +126,10 @@
   .quiz-overlay {
     display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.75);
     z-index: 100; justify-content: center; align-items: center;
+    pointer-events: none;
   }
-  .quiz-overlay.show { display: flex; }
+  .quiz-overlay.show { display: flex; pointer-events: none; }
+  .quiz-overlay .quiz-modal { pointer-events: auto; }
   .quiz-modal {
     position: relative;
     background: var(--surface); border: 1px solid var(--border); border-radius: 16px;
@@ -175,7 +177,7 @@
   /* Result overlay */
   .result-overlay {
     display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5);
-    z-index: 90; justify-content: center; align-items: flex-end;
+    z-index: 101; justify-content: center; align-items: flex-end;
   }
   .result-overlay.show { display: flex; }
   .result-toast {
