@@ -17,9 +17,10 @@ from pydantic import BaseModel
 from agent import run_agent, memory
 from agent.rag import kb, KB_DIR
 from agent.quiz import quiz_manager
+from agent.stats import get_overview, get_trend, get_topic_distribution
 import shutil
 
-app = FastAPI(title="学习 Agent", version="1.4.0")
+app = FastAPI(title="学习 Agent", version="1.5.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -274,6 +275,26 @@ async def quiz_summary(session_id: str):
     if "error" in summary:
         raise HTTPException(404, summary["error"])
     return summary
+
+
+# ========== 统计接口 v1.5 — 学习仪表盘 ==========
+
+@app.get("/api/stats/overview")
+async def stats_overview():
+    """学习总览：掌握度、测验成绩、待复习"""
+    return get_overview()
+
+
+@app.get("/api/stats/trend")
+async def stats_trend(days: int = 30):
+    """每日学习趋势"""
+    return {"trend": get_trend(days)}
+
+
+@app.get("/api/stats/topics")
+async def stats_topics():
+    """知识点掌握分布"""
+    return get_topic_distribution()
 
 
 # 挂载前端静态文件

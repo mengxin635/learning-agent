@@ -3,10 +3,11 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate, max-age=0">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<title>学习 Agent v1.4.3 · AI Tutor + Quiz</title>
+<title>学习 Agent v1.5.0 · AI Tutor + Quiz + Dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
 <style>
   :root {
     --bg: #06090f; --surface: #0d1117; --border: #21262d;
@@ -126,10 +127,8 @@
   .quiz-overlay {
     display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.75);
     z-index: 100; justify-content: center; align-items: center;
-    pointer-events: none;
   }
-  .quiz-overlay.show { display: flex; pointer-events: none; }
-  .quiz-overlay .quiz-modal { pointer-events: auto; }
+  .quiz-overlay.show { display: flex; }
   .quiz-modal {
     position: relative;
     background: var(--surface); border: 1px solid var(--border); border-radius: 16px;
@@ -177,7 +176,7 @@
   /* Result overlay */
   .result-overlay {
     display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5);
-    z-index: 101; justify-content: center; align-items: flex-end;
+    z-index: 90; justify-content: center; align-items: flex-end;
   }
   .result-overlay.show { display: flex; }
   .result-toast {
@@ -197,6 +196,19 @@
     padding: 9px 20px; font-size: .82rem; cursor: pointer; font-weight: 600;
   }
   .btn-next:hover { opacity: .85; }
+
+  /* Dashboard */
+  .dash-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 14px; flex-shrink: 0; }
+  .dash-card { background: #161b22; border-radius: 10px; padding: 12px; text-align: center; }
+  .dash-card .d-num { font-size: 1.4rem; font-weight: 700; }
+  .dash-card .d-lbl { font-size: .7rem; color: var(--dim); margin-top: 3px; }
+  .dash-card.topics .d-num { color: var(--accent); }
+  .dash-card.mastery .d-num { color: var(--green); }
+  .dash-card.quiz .d-num { color: var(--purple); }
+  .dash-card.review .d-num { color: var(--yellow); }
+  .chart-box { background: #161b22; border-radius: 10px; padding: 12px; margin-bottom: 12px; flex-shrink: 0; }
+  .chart-box .chart-title { font-size: .75rem; color: var(--dim); margin-bottom: 6px; text-transform: uppercase; letter-spacing: .5px; }
+  .chart-inner { width: 100%; height: 200px; }
 
   /* Quiz summary */
   .summary-card {
@@ -276,6 +288,24 @@
       <div id="kgReview"></div>
     </div>
 
+    <!-- Dashboard tab -->
+    <div class="tab-content" id="tabDashboard">
+      <h3>📊 学习仪表盘</h3>
+      <div class="dash-grid" id="dashCards"></div>
+      <div class="chart-box">
+        <div class="chart-title">📈 30天学习趋势</div>
+        <div class="chart-inner" id="chartTrend"></div>
+      </div>
+      <div class="chart-box">
+        <div class="chart-title">📊 知识点掌握度</div>
+        <div class="chart-inner" id="chartTopics"></div>
+      </div>
+      <div class="chart-box">
+        <div class="chart-title">🎯 知识状态分布</div>
+        <div class="chart-inner" id="chartPie"></div>
+      </div>
+    </div>
+
     <!-- Quiz tab -->
     <div class="tab-content" id="tabQuiz">
       <h3>📝 开始测验</h3>
@@ -315,6 +345,7 @@
       <button class="hdr-btn" id="btnKb" onclick="openTab('kb')">📚 知识库</button>
       <button class="hdr-btn" id="btnKg" onclick="openTab('kg')">🧠 知识图谱</button>
       <button class="hdr-btn quiz-btn" id="btnQuiz" onclick="openTab('quiz')">📝 测验</button>
+      <button class="hdr-btn" id="btnDashboard" onclick="openTab('dashboard')">📊 仪表盘</button>
     </header>
 
     <div id="chat">
@@ -378,11 +409,13 @@ function openTab(tab) {
   currentTab = tab;
   sidebar.classList.add('open');
   document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
-  document.getElementById('tab' + (tab==='kb'?'Kb':tab==='kg'?'Kg':'Quiz')).classList.add('active');
+  const tabIdMap = { kb: 'Kb', kg: 'Kg', quiz: 'Quiz', dashboard: 'Dashboard' };
+  document.getElementById('tab' + (tabIdMap[tab] || 'Dashboard')).classList.add('active');
   document.querySelectorAll('.hdr-btn').forEach(b => b.classList.remove('active'));
-  document.getElementById('btn' + (tab==='kb'?'Kb':tab==='kg'?'Kg':'Quiz')).classList.add('active');
+  document.getElementById('btn' + (tabIdMap[tab] || 'Dashboard')).classList.add('active');
   if (tab === 'kb') loadKBStats();
   else if (tab === 'kg') loadKG();
+  else if (tab === 'dashboard') loadDashboard();
 }
 
 // ====== KB ======
@@ -695,6 +728,64 @@ function nextQuestion() {
     openTab('quiz');
     addBubble('📝 测验已结束或出现异常。', 'ai');
   }
+}
+
+// ====== Dashboard v1.5 ======
+let chartTrendInst = null, chartTopicsInst = null, chartPieInst = null;
+
+async function loadDashboard() {
+  try {
+    const [ovR, trR, tpR] = await Promise.all([
+      fetch('/api/stats/overview'), fetch('/api/stats/trend?days=30'), fetch('/api/stats/topics')
+    ]);
+    const ov = await ovR.json();
+    const tr = await trR.json();
+    const tp = await tpR.json();
+    document.getElementById('dashCards').innerHTML =
+      '<div class="dash-card topics"><div class="d-num">'+(ov.total_topics||0)+'</div><div class="d-lbl">已学主题</div></div>'+
+      '<div class="dash-card mastery"><div class="d-num">'+(ov.mastered_topics||0)+'</div><div class="d-lbl">已掌握</div></div>'+
+      '<div class="dash-card quiz"><div class="d-num">'+(ov.quiz_accuracy||0)+'%</div><div class="d-lbl">测验正确率</div></div>'+
+      '<div class="dash-card review"><div class="d-num">'+(ov.due_review||0)+'</div><div class="d-lbl">待复习</div></div>';
+    const tDom = document.getElementById('chartTrend');
+    if (chartTrendInst) chartTrendInst.dispose();
+    chartTrendInst = echarts.init(tDom);
+    chartTrendInst.setOption({
+      tooltip: {trigger:'axis'}, grid: {left:40,right:10,top:10,bottom:25},
+      xAxis: {type:'category',data:(tr.trend||[]).map(d=>d.date.slice(5)),axisLabel:{color:'#8b949e',fontSize:9}},
+      yAxis: {type:'value',axisLabel:{color:'#8b949e',fontSize:10},splitLine:{lineStyle:{color:'#21262d'}}},
+      series: [{data:(tr.trend||[]).map(d=>d.activity),type:'line',smooth:true,
+        lineStyle:{color:'#58a6ff',width:2},itemStyle:{color:'#58a6ff'},
+        areaStyle:{color:new echarts.graphic.LinearGradient(0,0,0,1,[
+          {offset:0,color:'rgba(88,166,255,0.2)'},{offset:1,color:'rgba(88,166,255,0)'}])}}]
+    });
+    const bDom = document.getElementById('chartTopics');
+    if (chartTopicsInst) chartTopicsInst.dispose();
+    if (bDom && tp.labels && tp.labels.length) {
+      chartTopicsInst = echarts.init(bDom);
+      chartTopicsInst.setOption({
+        tooltip: {trigger:'axis',axisPointer:{type:'shadow'}},
+        grid: {left:110,right:10,top:10,bottom:20},
+        xAxis: {type:'value',axisLabel:{color:'#8b949e',fontSize:10},splitLine:{lineStyle:{color:'#21262d'}}},
+        yAxis: {type:'category',data:[...tp.labels].reverse(),axisLabel:{color:'#8b949e',fontSize:10}},
+        series: [{data:[...tp.values].reverse().map(v=>({value:v,itemStyle:{color:v>=65?'#3fb950':v>=35?'#58a6ff':'#d29922'}})),
+          type:'bar',barMaxWidth:16}]
+      });
+    }
+    const pDom = document.getElementById('chartPie');
+    if (chartPieInst) chartPieInst.dispose();
+    if (pDom) {
+      chartPieInst = echarts.init(pDom);
+      chartPieInst.setOption({
+        tooltip: {trigger:'item'}, legend: {bottom:0,textStyle:{color:'#8b949e',fontSize:10}},
+        series: [{type:'pie',radius:['40%','70%'],center:['50%','45%'],
+          data:[
+            {value:tp.mastered?tp.mastered.length:0,name:'已掌握',itemStyle:{color:'#3fb950'}},
+            {value:tp.learning?tp.learning.length:0,name:'学习中',itemStyle:{color:'#58a6ff'}},
+            {value:tp.weak?tp.weak.length:0,name:'薄弱',itemStyle:{color:'#d29922'}}
+          ],label:{color:'#8b949e',fontSize:10}}]
+      });
+    }
+  } catch(e) { console.error('Dashboard error:', e); }
 }
 
 async function showQuizSummary() {
